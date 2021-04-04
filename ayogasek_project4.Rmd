@@ -1,0 +1,337 @@
+---
+title: "Principal Component Analysis of Direct Sequence Matrix"
+author: "Abinaya Yogasekaram"
+date: "30/03/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts = list(width.cutoff=60), tidy=TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = '~/BINF_6110/Project 2')
+knitr::opts_chunk$set(fig.width=10, fig.height=8) 
+```
+
+## Introduction
+Principal Component Analysis is seen as the workhorse of statistics (Lever et al., 2017). The results gleaned from PCA can drive downstream analysis and also unearth potential structures or motifs within the data. The extension of this mathematical approach to genomics can prove fruitful in understanding patterns in variation. High-dimensional in nature, the information contained with sequence data has the potential to be parsed via PCA and which can correlate with geographical patterns and other sources of variation (Lever et al., 2017). Leveraging these differences to understand population variants may serve as an importance stepping stone in analysis.
+
+However, current methods available to conduct PCA on genomes work with many assumptions of the genome and and well tailored to suit human data (Konishi et al., 2019). Some of these assumptions include chromosome delineation and rates of evolution (Gauch et al., 2019) and therefore not transferable to the study of viral genomes for example, where the rate of evolution and variation is unlike the mutation rate seen in other organisms. Moreover, there are no chromosomes - viral genomes can very by strand and genetic material (Baron., 1996). Available PCA methods also fail to capture unique motifs through the distance matrix.  Summarizing differences between genomes via a distances measures often mask the genetic motifs and features that help understand *how* samples are different from each other (Konishi et al., 2019). 
+
+To circumvent this, Konishi et al propose a direct PCA approach that uses a matrix of the sequences based on boolean vectors - akin to one-hot-encoding in technology terms. Each position of a sequence alignment is serves as a variable x 5 (possibility of A , C, G, T, -) for any given position. With each row representing a sample, a column is populated with a 1 if a given nucleotide was contained in that position, 0 if not. The resulting matrix is subject to singular value decomposition (rotation) to identify the principal components. By taking this approach, invalid assumptions or rates of mutation accumulation are shed. Samples such as viral genomes (which do not contain chromosomes or a stable mutation) can be assessed at face value with direct comparison of their sequences. Distances or differences between genomes can be directly traced to the sites and bases that gave rise to that distance score.
+
+The objective of this analysis is to utilize the direct PCA approach on 122 complete genomes of the SARS-CoV2 Human coronavirus to see if this PCA approach mirrors the clade separation and differentiation seen in the paper written by Li et al., exploring the supertree method of phylogenetic analysis for SARS-Cov2 evolution. Concordance between these two methods would illustrate the value of Konishi's approach and may highlight clustering patterns not captured in the supertree phylogeny (2020). The direct PCA approach will be used to determine the distances between samples, the clustering of samples and sites based on the leading principal components. The goals of the analysis is to visualize the sample and nucleotide position based prinicipal components for motifs and to discern if the method is robust enough to use in place of existing PCA methods. 
+
+
+## Tutorial
+
+### Procuring Data/Where to find the datasets used
+Recall, the direct PCA method requires a sequence alignment. The data collected for this tutorial was initially run with data from from the GISAID database with high quality Coronavirus genomes. Unfortunately, posting this dataset would fail to adhere to the databases' policy on data sharing. However, the database is freely accessible through a registered account and I encourage you to run this analysis with their data as well. As an alternative, accession IDs of 122 complete genomes used by Li et al in the supertree paper are available on Genbank. A txt file with a list of these accessions as well as the resulting fasta file can be found in this github repository. 
+
+Tip 1: If a list of accession IDs are available, a batch download of the sequences can be done here: https://www.ncbi.nlm.nih.gov/sites/batchentrez. Simply upload the file of accession IDs and save the fasta file (SendTo > Format=fasta>Download).
+
+Tip 2: If using sparse fasta files (such as a download from GISAID), place the files in a separate directory and run the command below to combine.
+
+```{bash}
+cd <<Path/To/Your/Directory>>
+cat *.fasta > <<name_of_combined_file>>.fasta
+```
+
+##### Alignment
+
+Sequence data can be read in a fasta file using the BioConductor DECIPHER package. The sequences can then be aligned using the AlignSeqs function in the package (similar to the Methods described by Konishi et al., 2020). (Note, this can also be done with amino acid sequences for the alignment of proteins).
+
+Tip: alignment and the PCA calculation steps are very computationally taxing (especially if using whole genomes). If available, run these lines of R code on an HPC.
+
+```{bash}
+# copy the fasta file from your computer to the 
+scp <<name_of_combined_file>>.fasta <<location_on_HPC>>
+
+# load the following modules: (bioconductor packages used for alignment)
+module load StdEnv/2020  gcc/9.3.0 r-bundle-bioconductor/3.12 r
+
+# enter R session
+R
+```
+
+The AlignSeqs from the DECIPHER package from Bioconductor. Note if this analysis is being run on Amino Acid Sequences, the seqs object should be read in as readAAstringset. Different alignment algorithms can be used as well (ClustalOmega, MUSCLE, etc.) and available in the "msa" package from Bioconductor.
+
+```{r eval=FALSE, include=TRUE}
+# BiocManager::install("DECIPHER")
+library(DECIPHER)
+
+# Loading in sequence file (if this is in a different directory than your working directory, include your path before the file name).
+fas <- "full_supertree_accessions.fasta"
+
+# read in fasta file as DNAstringset object (it can distinguish between header lines and sequences)
+seqs <- readDNAStringSet(fas)
+
+# Alignseqs will produce an alignment object
+aligned <- AlignSeqs(seqs)
+```
+
+Once the alignment is complete, the aligned sequences can be written to a fasta file in the format required by the direct PCA method computation. For this method, the header line must be separated by a tab then followed by the sequence. In order to the store the file in format, a custom function is made. 
+
+```{r eval=FALSE, include=TRUE}
+
+# input arguments are the alignment object and the desired output file name.
+alignment2Fasta <- function(alignment, filename) {
+  sink(filename) # create a file in the pwd with desired output name
+  n <- length(names(alignment))
+  for(i in seq(1, n)) { # for each sequence in the alignment
+    cat(paste0('>', names(alignment)[i], "\t")) # paste the header line with the tab
+    the.sequence <- as.character(aligned[[i]]) # paste the sequence 
+    cat(the.sequence)
+    cat('\n')  # write a new line and repeat
+  }
+  
+  sink(NULL)
+}
+
+# output the alignment as the PCA_formatted.fasta
+alignment2Fasta(aligned, 'PCA_formatted.fasta')
+
+# this will save the file in your pwd
+
+```
+
+##### Direct PCA set-up
+
+The alignment fasta can be read in as a table since the header and sequence information is tab delimited (column 1 contains header info, column 2 contains the sequence information). 
+
+```{r eval=FALSE, include=TRUE}
+# read in table
+sites <- read.table(file="PCA_formatted.fasta", header=F, sep="\t")
+
+# the dimension of this table should be number of samples as rows and 2 columns.
+dim(sites)
+
+```
+
+The number of samples and the length of the sequences are required to setting up the sequence matrix to be populated with the one-hot-encoding (or boolean vectors). This empty matrix will be populated with information on the presence or absence of a given nucleotide in the alignment. 
+```{r eval=FALSE, include=TRUE}
+# wthese dimensions are required to setup the matrix.
+n.sample <- dim(sites)[1] # number of samples --> number of rows
+seq.len <- nchar(sites[2,2]) # length of the sequences after alignment (should be uniform among all samples) --> number of possible positions.
+
+# using dimensions to set up a boolean array.
+boolean.matrix <- array(0, dim=c(n.sample, 5*seq.len)) # 5*sequence length as there are 5 possible characters at each position: A,C,G,T, N/-. 
+
+# setting the column names to represent A,C,T,G or N and the sequence position.
+colnames(boolean.matrix) <- c(paste("A_", 1:seq.len, sep=""),paste("T_", 1:seq.len, sep=""),paste("G_", 1:seq.len, sep=""),paste("C_", 1:seq.len, sep=""),paste("N_", 1:seq.len, sep=""))
+
+# setting the row names of the matrix to hold the respective header information
+rownames(boolean.matrix) <- sites[ ,1]
+
+```
+
+###### Populating Boolean Values
+
+This is the most computationally expensive step. 
+1. For each sample in matrix (in this case 120 genomes), we will loop through the sequence letter by letter.
+2. If the sequence matches the base and position denoted by the column name (the base "A" at position 1), the A_1 column will be populated with a 1, else 0. The same will repeat for each base of the sequence. 
+3. Once the matrix has been populated with 1s and 0s for the sample, the loop moves onto the next sample. 
+4. !! Note the order of the column names set in the previous step and the order of bases in this for loop. If is essential that the same order is maintained (A,T,G,C) in both steps as the math used to fill in the matrix is based on their relative positions (T_ columns will always follow A_ columns, etc.). If this confusing - take a look at the head of the matrix.
+```{r eval=FALSE, include=TRUE}
+head (boolean.matrix)
+
+for (samp. in 1:n.sample){ # for each sample in the matrix
+  se <- sites[samp., 2] # the second column contains the sequence.
+  se <- tolower(se) # converting to lower case letters
+  
+  for (letter in  1:seq.len){ # for each position in this sequence ...
+    base <- substr(se, letter,letter) # the base entity will be the character to match
+    
+    if(base =="a") { # if the base is a
+      boolean.matrix[samp., letter] <-1 # populate the cell with 1. If not, is the base a T?
+    } else {
+      
+      if(base =="t") {
+        boolean.matrix[samp., letter+seq.len] <-1 # if so, populate with a 1. If not, move to the next if else block and continue
+      } else {
+        
+        if(base =="g") {
+          boolean.matrix[samp., letter+seq.len*2] <-1
+        } else {
+          
+          if(base =="c") {
+            boolean.matrix[samp., letter+seq.len*3] <-1
+          } else {
+            
+            boolean.matrix[samp., letter+seq.len*4] <-1 # if it not a nucleotide (A,T,C,G), populate the N/- column with a 1.
+          }}}}
+  }}
+
+# checking that all nucleotides are accounted for. the sum of each row in this matrix should be the length of the sequence.
+apply(boolean.matrix, 1, sum)
+```
+
+##### Principal Component Analysis: Data pre-processing
+
+Before actually plotting the PCAs, the data will need to be centered and scaled around the mean. This is to avoid very large numbers biasing or skewing the  principal components towards one base/position combination.
+There is also a step to correct for double counting the distances between samples. Determining the distance between two samples uses the Euclidean distance (A-B)^2. However, when populating the matrix, the distances have been double counted: (A-B)^2 and (B-A)^2. to compensate, each distance measure (difference between sequences) is divided by the square root.
+```{r eval=FALSE, include=TRUE}
+## finding the center (or mean) for each column
+center<- apply(boolean.matrix, 2, mean) # extracting the mean of all columns
+
+# applying this center to all columns of the matrix to find the differences between sequences. 
+differences<-sweep(boolean.matrix, 2, center)
+
+# compensating for the doubled counts in Euclidean distance metrics.
+differences <- differences/(2^0.5)   
+
+```
+
+Checking the distribution of the distances between sequences can provide some indication of the variation we'd see in the PCs. If there are many small distances, the points will likely be closer in space and not as separated. If there is a large distribution of differences, the groups may be much more differentiated. Check if the distances are normally distributed with a qq norm plot. 
+Note: If running plots on an HPC such as graham, ensure the the plot command is flanked by the following:
+png("name_of_plot.png")
+<<code for plot>>
+dev.off(). This will save the plot as a png file in the present working directory for viewing outside the HPC.
+
+```{r eval=FALSE, include=TRUE}
+# checking distribution of the distances
+distances<- (apply(differences^2, 1, sum))^0.5
+qqnorm(distances) 
+
+library(ggplot2)
+
+# histogram of distances
+ggplot(data=as.data.frame(distances), aes(x=distances))+
+  geom_histogram(color="darkblue", fill="lightblue", bins = 20)
+```
+
+The majority of the samples have very small distances while there are a few with very large distances. This suggests that most of the samples have very similar sequences and will likely cluster together in the principal component space. The samples with very large distances are good indicators of the method differentiating between the SARS-CoV2 sequences and their precursors (MERS, SARS, SARS-like Bat Viruses, etc.)
+
+
+##### Principal Component Analysis: Calculating PCs
+Now that the data have been centered and scaled, they are subject to the PC calculations. The matrix is setup in such a way that the svd function applied to the matrix of differences can identify the linear combinations of the PCs. If familiar with eigen decomposition, note that the mathematics is limited to a diagonal and square matrix. SVD is a generalized version that can be applied to any m x n matrix. The benefit of this method is not only identifying variation in the samples, but also the nucleotide positions. In other words, seeing the same bases and positions cluster together away from the rest of the data suggests that the bases in that position may be a discernible motif.
+
+```{r eval=FALSE, include=TRUE}
+#### PCA core
+# singular value decomposition of a matrix (similar to identifying the linear combinations in a matrix)
+res_svd <- svd(diffs)  #
+# d: vector of singular values, u: matrix with columns of left singular values, v: matrix with columns of right singular values.
+str(res_svd)
+Left <- res_svd$u		# the left singular vector
+Right <- res_svd$v		# the right singular vector
+sqL <- diag(res_svd$d)		# diagonal matrix of the singular values (identifying the variance from the principal components)
+
+### calculation of principal components
+sPC_nuc  	<-	 Right %*% sqL / (n.sample^0.5)
+sPC_sample	 <-	 Left %*% sqL/ (seq.len^0.5)
+
+# the total of the above components are the number of values, or, in this context, principal components that describe the same amount of data in less values.
+
+# set the row names of the respective tables.
+rownames(sPC_nuc)<- colnames(boolean.matrix) 
+rownames(sPC_sample)<- rownames(boolean.matrix) 
+
+```
+
+##### Visualizing Results
+
+The bulk of the Principal Component Analysis are best visualized in a Biplot. To see what which PCs contribute most towards describing variation. The values contained in each column of the sPC matrices can be viewed as the loadings for each of the bases/positions. 
+
+###### Contribution Plot
+By assessing the contribution of each prinicipal component, the amount of variation described by the  PRs can be viewed. If an "elbow" is present, it typically suggests that the leading principal components describe the majority of the variation while the others have some contribution, however, not as large. The contributions are calculated by finding the percentage of variance described by the respective PC over the sum of the variation described by all PCs.
+
+```{r eval=FALSE, include=TRUE}
+# scree plot (contribution of each principal component towards explaining the overall variation in the data)
+index <- 1:20
+contribution.scores <- round((res_svd$d/sum(res_svd$d)*100)[1:20],2)
+contributions <- data.frame(index,contribution.scores)
+
+ggplot(data=contributions, aes(x=`index`, y=`contribution.scores`, group=1)) +
+  geom_line(linetype = "twodash")+
+  geom_text(aes(label=`contribution.scores`),hjust=-0.54, vjust=-0.6, size=3)+
+  geom_point() + labs(y="PC Contribution (%)", x = "PC") + ggtitle("Cumulative Proportion of Variance Described by Leading 20 PCs") 
+
+```
+
+There appears to be a distinct elbow in the contribution scores. This suggests that the first 3 PCs best describes the variations in the samples. Notice how the line reaches a plateau where the contributions are 3% or less. Thus, the most variation between the samples can be best visualized with a 3D plot of the top 3 PCs. Note however, that the leading 3 PCs only describe ~39% of the variation in the data. This suggests that most of the samples are very similar with minute differences between them (recall, this was seen in the histogram of the distances as well). It can be hypothesized that the leading PCs best illustrate the samples that had very large distances. 
+
+###### Principal Component Plot of Samples
+
+The data pulled from the Li et al paper included the precursor or genus for each of the sequence. These can be included in the dataframe as a factor variable to differentiate between the points.
+
+```{r}
+sPC_samples <- read.table("full_supertree_sPC_sample.txt", sep="\t")
+```
+
+```{r eval=FALSE, include=TRUE}
+#### PCA plot of the samples
+library(scatterplot3d)
+library(stringr)
+
+# extracting isolate names
+labels <- rownames(sPC_samples)
+accessions <- str_extract(labels,"[A-Z]+[0-9]+")
+sample.pcs <- data.frame(sPC_sample, accessions)
+
+type <- c("SARS","SARS","SARS","SARS","BAT","BAT", "BAT", "SARS", "SARS", "MERS", "BAT", "BAT", "BAT", "MERS", "BAT", "BAT", "BAT", "BAT", "SARS-COV-2", "REF", rep("SARS-COV-2", 100))
+
+sample.pcs$type <- as.factor(type)
+
+colors <- c("#FFDB6D", "#C4961A", "#F4EDCA", "#D16103", "#C3D7A4")
+colors <- colors[as.numeric(sample.pcs$type)]
+
+```
+```{r echo=TRUE}
+scatterplot3d(sample.pcs[,1:3], pch=16, main="3D Principal Component Plot of Coronavirus genomes", color=colors, xlab="sPC1", ylab="sPC2", zlab="sPC3", angle = 70, cex.symbols = 1) 
+legend("topright", legend = levels(sample.pcs$type),col =  c("#FFDB6D", "#C4961A", "#F4EDCA", "#D16103", "#C3D7A4"), pch = 16)
+```
+
+###### Principal Component Plot of Nucleotide Sites
+why plot sites pc
+High scores are not always randomly dispersed: they gather in hot spots, such as that found in Fig. 3C (sPC1), which indicate motifs that are specific to some groups. 
+Additionally, information of base will supply useful cues to understand relationship of sample differences and function of the sequence; this will become clearly apparent in analysing functional motifs of amino acid sequences.
+
+```{r eval=FALSE, include=TRUE}
+# PCA plot of the positions
+position.index <- 1:seq.len
+A.<-sPC_nuc[1:seq.len,1]
+T.<-sPC_nuc[1:seq.len+seq.len,1]
+G. <- sPC_nuc[1:seq.len+seq.len+seq.len,1]
+C. <- sPC_nuc[1:seq.len+seq.len+seq.len+seq.len,1]
+
+sites.plotting <- data.frame(position.index, A., G., C., T.)
+library(reshape2)
+molten.data<-melt(sites.plotting,
+                  measure.vars=c("A.", "G.", "C.", "T."),
+                  variable_name = "variable")
+molten.data$label <- paste(molten.data$variable, "_", molten.data$position.index)
+
+ggplot(molten.data, aes(x=`position.index`, y=`value`)) + geom_point(aes(color = `variable`, shape = `variable`), size = 2) + scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9", "#009E73")) + theme(legend.position="bottom")+
+  labs(y="sPC1", x = "Sites") + ggtitle("Site Specific Variation") 
+
+# or use label names to see the exact position numbers.
+ggplot(molten.data, aes(x=`position.index`, y=`value`)) + geom_text(aes(color = `variable`, label=`label`), size = 1) + scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9", "#009E73")) + theme(legend.position="bottom")+
+  labs(y="sPC1", x = "Sites") + ggtitle("Site Specific Variation") 
+```
+
+
+## Reflection
+
+  Being able to reproduce analyses seen in peer-reviewed research is a cornerstone of bioinformatic studies. Being able to conduct analyses with similar data sets lend credence to different methods proposed by researchers. However, the implementation of these methods are not easily transferable and require manipulation. The impetus for researching this method of PC analysis was the lack of assumption free analyses available. As stated, applications such as Plink are well-suited for human chromosomes and perform the analysis based on mutation rates. Konishi et al was successful in using this method to not only separate coronavirus genomes through the principal components but also compared the outputs of using Direct PCA and known PCA methods of human and lion genomes.
+
+  The results showed that this method was able to better discriminate between SNPs and had clearer separation of clusters when subject to the direct PCA method.The implementation via an R script also made the analysis method more accessible (the original R script used by Konishi can be found in this github repository). The accompanying paper also set the stage well for understanding the methodology and rationale for applying this workflow (**Principal Component Analysis Applied Directly to Sequence Matrix**, Nature 2019). The actual analysis of Principal Components also used basic R functions and was heavily maths based as a result of making the approach assumption free. This also added to the accessibility of the workflow since it is easily transferable and can be easily translated to a High Performance Computing Platform Context and did not have many dependencies (original plots were made in base R). DECIPHER was used in this tutorial but any alignment package can be used to deliver the same output. Additionally, this method is not restricted to nucleotide sequences and can also work with amino acid (AA) sequences. However, the number of column vectors for each position will change and requires different values in the numerical construction. The similar script for AA sequences can be found at this github repository.
+
+  As seamless and accessible as this method of PC analysis was, there were some associated challenges. The aspect that present the greatest challenge was data procurement. Identifying the size and scope of the genomes to be pulled to see a resonable enough difference between the samples required thorough research. Coronavirus variants that affect humans are extremely similar (especially in regions that code for necessary proteins). Typically, studies broaden the scope by assessing precursor versions of the coronavirus that infected other hosts (Bat, Pangolin, etc.).
+Another challenge associated with data procurement is finding clean data. Because this method calculates principal components through the sequences direct, anything can modify the alignment such as sequence artifacts or errors can persist downstream of the alignment step. The GISAID database was helpful in obtaining very high quality data used in publications and many epidemiological efforts and is a great resource.
+
+  Another challenge was the understanding of the math. As biologist, the mathematical and understanding how functions and commands compute the data is obscure. Applications and modules prioritize ease of use but forces the black box approach (putting any data in will churn out a result, whether or not it is biologically meaningful is an analysis of it's own). Constructing this tutorial required familiarity with one-hot encoding (boolean matrix), singular value decomposition, euclidean distances etc. 
+
+  Disadvantages of the direct PCA method was also made aware through this analysis. One shortfall is that the size and dimensionality of the analysis will increase significantly as the size of the sequences increases. Direct PCA in entire viral genome were feasible because they are relatively small for a genome (~39k bases for SARS-CoV2). However, this is not as feasible for complete genome of larger species (fish, humans, etcs.) and computationally expensive (5 X length of the human genome ~ 15 billion vectors in the matrix to decompse). Thus, application of this analysis to these species will likely need to be scaled down to the gene or protein level.
+
+  This method is also likely not employable for understudied organisms where good quality alignments are rare. Since the sequence matrix is dependent on multiple sequence alignments, unplaced contigs and repeat regions in scaffolds are difficult to discern and therefore difficult to align. This again would persist in downstream analyses.
+  Another caveat that the authors also highlight is that this method is not robust enough to be a stand alone analysis in research. Rather, it would be better to take this approach as a means of assessing concordance between methods (are you getting the same clustering, could you data be influenced by noise). This feeds the purpose of scientific discovery, questioning results and seeing how results differ when subject to alternative methods. 
+
+Despite the challenges, Dr. Konishi presents an assumption free approach to PC analysis can be used to govern downstream analysis steps and the expected clustering output when extended to a phylogenetic analysis. The method opens the door for "species" that do not abide by typical evolutionary assumptions and generate biologically relevant insight using the direct PCA method. 
+
+If one wishes to handle phylogenetic problems in a field of science, direct PCA is the only choice at present. This would reflect the philosophy in this field: e.g., many methods have been produced under ad hoc assumptions and the methods have become more complex with further assumptions. However, the appropriateness of such assumptions cannot be confirmed. In contrast, direct PCA is a simple method with no arbitral choices. In addition, it does not assume that the relationships among samples should form a phylogenetic tree. Different assumptions, as well as sensitivity to outliers or parameters, will produce a variety of results that enable “cherry-picking” of the most convenient one. It is true that not all research areas have to be strictly scientific. However, sequence data are capable of giving valuable information that directly influences human welfare: for example, classifying of viruses and validation of their changes. Those areas should be objective if we are to share knowledge validly. Although here we compared our method with previous ones, this is not a recommendation of such ad-hoc selection of methodologies. Here, the comparisons were performed to overcome the difficulty of discussion beyond intellectual frameworks that differed in falsifiability and objectivity. We hope this method will be a fair contribution to science.
+singular value among the total values. It should be noted that the contribution is not a normalized value; for example, a larger dimension will give smaller contributions. Normalization is difficult because the attenuation patterns are affected by the property of the data. Therefore, contributions cannot be compared between analyses.
+
+## References 
+Konishi, T. (2020). Principal component analysis of coronaviruses reveals their diversity and seasonal and pandemic potential. PLoS ONE, 15(12 December). https://doi.org/10.1371/journal.pone.0242954
+
+Konishi, T., Matsukuma, S., Fuji, H., Nakamura, D., Satou, N., & Okano, K. (2019). Principal Component Analysis applied directly to Sequence Matrix. Scientific Reports, 9(1). https://doi.org/10.1038/s41598-019-55253-0
+
+Li, T., Liu, D., Yang, Y., Guo, J., Feng, Y., Zhang, X., Cheng, S., & Feng, J. (2020). Phylogenetic supertree reveals detailed evolution of SARS-CoV-2. https://doi.org/10.21203/rs.3.rs-33194/v1
